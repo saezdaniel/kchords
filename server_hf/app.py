@@ -283,62 +283,182 @@ async def analyze(file: UploadFile = File(...), name: str = Form(default='')):
 
 
 def _extract_youtube_audio(video_id: str, temp_dir: str):
-    """Descarga el audio de YouTube burlando el bloqueo antibot mediante clientes móviles o Invidious."""
+    """Descarga el audio de YouTube con múltiples capas de tolerancia a fallos:
+
+    1. yt-dlp con cookies (si se configuró YOUTUBE_COOKIES en Render o existe cookies.txt)
+    2. yt-dlp con clientes móviles (Android, iOS, Android VR, Web Embedded, MWeb)
+    3. Cobalt API v10/v11
+    4. Piped API
+    5. Invidious API
+    """
     import os
     import requests
     import yt_dlp
 
     title = f'Video de YouTube ({video_id})'
     uploader = 'YouTube'
+    video_url = f'https://www.youtube.com/watch?v={video_id}'
+    errors = []
 
-    # 1. Intentar con yt-dlp usando clientes móviles oficiales (Android/iOS) que no requieren login
-    mobile_clients = [
-        ['android', 'ios'],
-        ['ios'],
-        ['android'],
-        ['mweb', 'web_embedded'],
-        ['tv_embedded'],
-    ]
+    # 0. Revisar si hay cookies configuradas en Render (Environment Variable: YOUTUBE_COOKIES o YTDL_COOKIES)
+    cookie_file = None
+    cookies_env = os.environ.get('YOUTUBE_COOKIES') or os.environ.get('YTDL_COOKIES')
+    if cookies_env:
+        cookie_file = os.path.join(temp_dir, 'cookies.txt')
+        with open(cookie_file, 'w', encoding='utf-8') as cf:
+            cf.write(cookies_env)
+    elif os.path.exists('cookies.txt'):
+        cookie_file = os.path.abspath('cookies.txt')
 
-    for clients in mobile_clients:
-        try:
-            out_template = os.path.join(temp_dir, f'{video_id}.%(ext)s')
-            ydl_opts = {
+    # 1. Intentar yt-dlp con varias configuraciones
+    ydl_configs = []
+    if cookie_file:
+        ydl_configs.append({
+            'name': 'yt-dlp (con cookies)',
+            'opts': {
+                'cookiefile': cookie_file,
                 'format': 'bestaudio/best',
+            },
+        })
+
+    ydl_configs.extend([
+        {
+            'name': 'yt-dlp (android)',
+            'opts': {
+                'format': 'bestaudio/best',
+                'extractor_args': {'youtube': {'player_client': ['android']}},
+            },
+        },
+        {
+            'name': 'yt-dlp (ios)',
+            'opts': {
+                'format': 'bestaudio/best',
+                'extractor_args': {'youtube': {'player_client': ['ios']}},
+            },
+        },
+        {
+            'name': 'yt-dlp (android_vr,web_embedded)',
+            'opts': {
+                'format': 'bestaudio/best',
+                'extractor_args': {'youtube': {'player_client': ['android_vr', 'web_embedded']}},
+            },
+        },
+        {
+            'name': 'yt-dlp (mweb)',
+            'opts': {
+                'format': 'bestaudio/best',
+                'extractor_args': {'youtube': {'player_client': ['mweb']}},
+            },
+        },
+        {
+            'name': 'yt-dlp (default)',
+            'opts': {
+                'format': 'bestaudio/best',
+            },
+        },
+    ])
+
+    for cfg in ydl_configs:
+        try:
+            out_template = os.path.join(temp_dir, f'{video_id}_%(id)s.%(ext)s')
+            opts = {
                 'outtmpl': out_template,
                 'quiet': True,
                 'no_warnings': True,
                 'nocheckcertificate': True,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': clients,
-                        'player_skip': ['webpage', 'configs', 'js'],
-                    }
-                },
-                'http_headers': {
-                    'User-Agent': 'com.google.android.youtube/19.29.35 (Linux; U; Android 11; en_US) gzip',
-                },
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': '128',
                 }],
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=True)
+            opts.update(cfg['opts'])
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
                 title = info.get('title') or title
                 uploader = info.get('uploader') or info.get('channel') or uploader
 
             audio_files = [
                 os.path.join(temp_dir, f) for f in os.listdir(temp_dir)
-                if f.endswith('.mp3') or f.endswith('.m4a') or f.endswith('.webm') or f.endswith('.opus')
+                if f.endswith(('.mp3', '.m4a', '.webm', '.opus', '.wav', '.aac'))
             ]
             if audio_files:
-                return audio_files[0], title, uploader
-        except Exception:
-            pass
+                for af in audio_files:
+                    if os.path.exists(af) and os.path.getsize(af) > 1000:
+                        return af, title, uploader
+        except Exception as e:
+            errors.append(f"{cfg['name']}: {str(e)[:80]}")
 
-    # 2. Fallback: Instancias públicas de Invidious (nunca bloquean servidores)
+    # 2. Intentar instancias de Cobalt API (v10 / v11)
+    cobalt_instances = [
+        'https://cobalt-api.kwiatekm.tokyo',
+        'https://api.cobalt.tools',
+        'https://co.wuk.sh',
+        'https://cobalt.api.scast.me',
+    ]
+    for cob in cobalt_instances:
+        try:
+            headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+            payload = {
+                'url': video_url,
+                'downloadMode': 'audio',
+                'audioFormat': 'mp3',
+            }
+            r = requests.post(f'{cob}/', json=payload, headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                stream_url = data.get('url')
+                if stream_url:
+                    audio_res = requests.get(stream_url, timeout=20, stream=True)
+                    if audio_res.status_code == 200:
+                        target_file = os.path.join(temp_dir, f'{video_id}.mp3')
+                        with open(target_file, 'wb') as f:
+                            for chunk in audio_res.iter_content(chunk_size=65536):
+                                if chunk:
+                                    f.write(chunk)
+                        if os.path.exists(target_file) and os.path.getsize(target_file) > 1000:
+                            return target_file, title, uploader
+        except Exception as e:
+            errors.append(f'Cobalt: {str(e)[:80]}')
+
+    # 3. Intentar Piped API
+    piped_instances = [
+        'https://pipedapi.kavin.rocks',
+        'https://api.piped.privacydev.net',
+        'https://piped-api.garudalinux.org',
+        'https://api-piped.mha.fi',
+        'https://pipedapi.leptons.xyz',
+        'https://pipedapi.tokhmi.xyz',
+    ]
+    for base in piped_instances:
+        try:
+            r = requests.get(f'{base}/streams/{video_id}', timeout=4, headers={'User-Agent': 'Mozilla/5.0'})
+            if r.status_code == 200:
+                data = r.json()
+                title = data.get('title') or title
+                uploader = data.get('uploader') or uploader
+                audio_streams = data.get('audioStreams', [])
+                if audio_streams:
+                    audio_streams.sort(key=lambda x: int(x.get('bitrate', 0)), reverse=True)
+                    stream_url = audio_streams[0].get('url')
+                    if stream_url:
+                        audio_res = requests.get(stream_url, timeout=20, stream=True)
+                        if audio_res.status_code == 200:
+                            target_file = os.path.join(temp_dir, f'{video_id}.m4a')
+                            with open(target_file, 'wb') as f:
+                                for chunk in audio_res.iter_content(chunk_size=65536):
+                                    if chunk:
+                                        f.write(chunk)
+                            if os.path.exists(target_file) and os.path.getsize(target_file) > 1000:
+                                return target_file, title, uploader
+        except Exception as e:
+            errors.append(f'Piped: {str(e)[:80]}')
+
+    # 4. Intentar Invidious API
     invidious_instances = [
         'https://inv.nadeko.net',
         'https://invidious.nerdvpn.de',
@@ -346,11 +466,11 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
         'https://yt.artemislena.eu',
         'https://invidious.flokinet.to',
         'https://invidious.private.coffee',
+        'https://invidious.asir.dev',
     ]
-
     for inst in invidious_instances:
         try:
-            r = requests.get(f'{inst}/api/v1/videos/{video_id}', timeout=4)
+            r = requests.get(f'{inst}/api/v1/videos/{video_id}', timeout=4, headers={'User-Agent': 'Mozilla/5.0'})
             if r.status_code == 200:
                 data = r.json()
                 title = data.get('title') or title
@@ -361,18 +481,20 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
                     audio_streams.sort(key=lambda x: int(x.get('bitrate', 0)), reverse=True)
                     stream_url = audio_streams[0].get('url')
                     if stream_url:
-                        audio_res = requests.get(stream_url, timeout=12, stream=True)
+                        audio_res = requests.get(stream_url, timeout=20, stream=True)
                         if audio_res.status_code == 200:
                             target_file = os.path.join(temp_dir, f'{video_id}.m4a')
                             with open(target_file, 'wb') as f:
                                 for chunk in audio_res.iter_content(chunk_size=65536):
                                     if chunk:
                                         f.write(chunk)
-                            return target_file, title, uploader
-        except Exception:
-            pass
+                            if os.path.exists(target_file) and os.path.getsize(target_file) > 1000:
+                                return target_file, title, uploader
+        except Exception as e:
+            errors.append(f'Invidious: {str(e)[:80]}')
 
-    raise Exception('No se pudo extraer la pista de audio de YouTube. Se probaron múltiples métodos móviles e instancias.')
+    error_summary = ' | '.join(errors[-3:]) if errors else 'No se pudo conectar a ningún servicio de extracción.'
+    raise Exception(f'No se pudo extraer el audio de YouTube ({error_summary}). Consejo: Puedes configurar la variable de entorno YOUTUBE_COOKIES en Render para autenticación 100% garantizada.')
 
 
 @app.get('/analyze-youtube')
