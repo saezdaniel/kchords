@@ -317,7 +317,14 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
     ydl_configs = []
     if cookie_file:
         ydl_configs.append({
-            'name': 'yt-dlp (con cookies)',
+            'name': 'yt-dlp (cookies default)',
+            'opts': {
+                'cookiefile': cookie_file,
+                'format': 'bestaudio/best',
+            },
+        })
+        ydl_configs.append({
+            'name': 'yt-dlp (cookies web)',
             'opts': {
                 'cookiefile': cookie_file,
                 'format': 'bestaudio/best',
@@ -328,7 +335,6 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
                 },
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-                    'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
                 },
             },
         })
@@ -399,7 +405,7 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
                     if os.path.exists(af) and os.path.getsize(af) > 1000:
                         return af, title, uploader
         except Exception as e:
-            errors.append(f"{cfg['name']}: {str(e)[:80]}")
+            errors.append(f"{cfg['name']}: {str(e)[:120]}")
 
     # 2. Intentar instancias de Cobalt API (v10 / v11)
     cobalt_instances = [
@@ -505,8 +511,8 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
         except Exception as e:
             errors.append(f'Invidious: {str(e)[:80]}')
 
-    error_summary = ' | '.join(errors[-3:]) if errors else 'No se pudo conectar a ningún servicio de extracción.'
-    raise Exception(f'No se pudo extraer el audio de YouTube ({error_summary}). Consejo: Puedes configurar la variable de entorno YOUTUBE_COOKIES en Render para autenticación 100% garantizada.')
+    error_summary = ' \n• '.join(errors) if errors else 'No se pudo conectar a ningún servicio de extracción.'
+    raise Exception(f'No se pudo extraer el audio de YouTube. Detalle de los intentos:\n• {error_summary}')
 
 
 @app.get('/analyze-youtube')
@@ -550,13 +556,27 @@ async def analyze_youtube(id: str = '', url: str = ''):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Error procesando video de YouTube: {e}')
     finally:
-        # Limpiar archivos temporales
         try:
             for f in os.listdir(temp_dir):
                 os.remove(os.path.join(temp_dir, f))
             os.rmdir(temp_dir)
         except Exception:
             pass
+
+
+@app.get('/debug-youtube')
+async def debug_youtube(id: str = 'dPDo8TM7Zro'):
+    import os
+    import sys
+    cookies_env = os.environ.get('YOUTUBE_COOKIES') or os.environ.get('YTDL_COOKIES')
+    return {
+        'pythonVersion': sys.version,
+        'hasCookiesEnv': bool(cookies_env),
+        'cookiesEnvLength': len(cookies_env) if cookies_env else 0,
+        'localCookiesTxtExists': os.path.exists('cookies.txt'),
+        'appCookiesTxtExists': os.path.exists('/app/cookies.txt'),
+        'testVideoId': id,
+    }
 
 
 TEST_PAGE = """<!doctype html>
