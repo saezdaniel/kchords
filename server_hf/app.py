@@ -282,11 +282,32 @@ async def analyze(file: UploadFile = File(...), name: str = Form(default='')):
     return JSONResponse(content=result)
 
 
+def _normalize_netscape_cookies(raw_text: str) -> str:
+    """Normaliza cookies en formato Netscape convirtiendo espacios múltiples a tabuladores (\t)."""
+    lines = []
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            lines.append(raw_line)
+            continue
+        if '\t' in line:
+            lines.append(line)
+        else:
+            parts = line.split()
+            if len(parts) >= 7:
+                domain, flag, path, secure, exp, name = parts[:6]
+                value = ' '.join(parts[6:])
+                lines.append(f'{domain}\t{flag}\t{path}\t{secure}\t{exp}\t{name}\t{value}')
+            else:
+                lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
 def _extract_youtube_audio(video_id: str, temp_dir: str):
     """Descarga el audio de YouTube con múltiples capas de tolerancia a fallos:
 
-    1. yt-dlp con cookies (si se configuró YOUTUBE_COOKIES en Render o existe cookies.txt)
-    2. yt-dlp con clientes móviles (Android, iOS, Android VR, Web Embedded, MWeb)
+    1. yt-dlp con cookies (Render Secret File / Environment / cookies.txt)
+    2. yt-dlp con clientes móviles/TV (Android, iOS, TV Embedded, Web Embedded)
     3. Cobalt API v10/v11
     4. Piped API
     5. Invidious API
@@ -300,18 +321,21 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
     video_url = f'https://www.youtube.com/watch?v={video_id}'
     errors = []
 
-    # 0. Revisar si hay cookies configuradas en Render (Environment Variable: YOUTUBE_COOKIES o archivo cookies.txt)
+    # 0. Buscar cookies en todas las ubicaciones posibles
     cookie_file = None
     cookies_env = os.environ.get('YOUTUBE_COOKIES') or os.environ.get('YTDL_COOKIES')
+    secret_paths = ['/etc/secrets/cookies.txt', 'cookies.txt', '/app/cookies.txt']
+
     if cookies_env:
         cookie_file = os.path.join(temp_dir, 'cookies.txt')
-        content = cookies_env.replace('\\n', '\n').replace('\\r', '').replace('\\t', '\t').strip()
+        normalized = _normalize_netscape_cookies(cookies_env.replace('\\n', '\n').replace('\\r', ''))
         with open(cookie_file, 'w', encoding='utf-8') as cf:
-            cf.write(content)
-    elif os.path.exists('cookies.txt'):
-        cookie_file = os.path.abspath('cookies.txt')
-    elif os.path.exists('/app/cookies.txt'):
-        cookie_file = '/app/cookies.txt'
+            cf.write(normalized)
+    else:
+        for sp in secret_paths:
+            if os.path.exists(sp):
+                cookie_file = os.path.abspath(sp)
+                break
 
     # 1. Intentar yt-dlp con varias configuraciones
     AUDIO_FORMAT_SELECTOR = 'ba/ba*/bestaudio/bestaudio*/140/251/249/250/139/best/b'
@@ -345,6 +369,18 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
             },
         })
         ydl_configs.append({
+            'name': 'yt-dlp (cookies tv_embedded)',
+            'opts': {
+                'cookiefile': cookie_file,
+                'format': AUDIO_FORMAT_SELECTOR,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['tv_embedded', 'tv'],
+                    }
+                },
+            },
+        })
+        ydl_configs.append({
             'name': 'yt-dlp (cookies default)',
             'opts': {
                 'cookiefile': cookie_file,
@@ -353,6 +389,13 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
         })
 
     ydl_configs.extend([
+        {
+            'name': 'yt-dlp (tv_embedded)',
+            'opts': {
+                'format': AUDIO_FORMAT_SELECTOR,
+                'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'tv']}},
+            },
+        },
         {
             'name': 'yt-dlp (android)',
             'opts': {
