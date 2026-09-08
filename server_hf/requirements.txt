@@ -1,0 +1,7 @@
+librosa==0.10.2.post1
+numpy<2
+scipy
+fastapi
+uvicorn[standard]
+python-multipart
+yt-dlp
