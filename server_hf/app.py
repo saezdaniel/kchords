@@ -300,15 +300,18 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
     video_url = f'https://www.youtube.com/watch?v={video_id}'
     errors = []
 
-    # 0. Revisar si hay cookies configuradas en Render (Environment Variable: YOUTUBE_COOKIES o YTDL_COOKIES)
+    # 0. Revisar si hay cookies configuradas en Render (Environment Variable: YOUTUBE_COOKIES o archivo cookies.txt)
     cookie_file = None
     cookies_env = os.environ.get('YOUTUBE_COOKIES') or os.environ.get('YTDL_COOKIES')
     if cookies_env:
         cookie_file = os.path.join(temp_dir, 'cookies.txt')
+        content = cookies_env.replace('\\n', '\n').replace('\\r', '').replace('\\t', '\t').strip()
         with open(cookie_file, 'w', encoding='utf-8') as cf:
-            cf.write(cookies_env)
+            cf.write(content)
     elif os.path.exists('cookies.txt'):
         cookie_file = os.path.abspath('cookies.txt')
+    elif os.path.exists('/app/cookies.txt'):
+        cookie_file = '/app/cookies.txt'
 
     # 1. Intentar yt-dlp con varias configuraciones
     ydl_configs = []
@@ -318,6 +321,15 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
             'opts': {
                 'cookiefile': cookie_file,
                 'format': 'bestaudio/best',
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['web', 'web_creator', 'mweb'],
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+                    'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
+                },
             },
         })
 
