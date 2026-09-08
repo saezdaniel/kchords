@@ -282,13 +282,105 @@ async def analyze(file: UploadFile = File(...), name: str = Form(default='')):
     return JSONResponse(content=result)
 
 
+def _extract_youtube_audio(video_id: str, temp_dir: str):
+    """Descarga el audio de YouTube burlando el bloqueo antibot mediante clientes móviles o Invidious."""
+    import os
+    import requests
+    import yt_dlp
+
+    title = f'Video de YouTube ({video_id})'
+    uploader = 'YouTube'
+
+    # 1. Intentar con yt-dlp usando clientes móviles oficiales (Android/iOS) que no requieren login
+    mobile_clients = [
+        ['android', 'ios'],
+        ['ios'],
+        ['android'],
+        ['mweb', 'web_embedded'],
+        ['tv_embedded'],
+    ]
+
+    for clients in mobile_clients:
+        try:
+            out_template = os.path.join(temp_dir, f'{video_id}.%(ext)s')
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': out_template,
+                'quiet': True,
+                'no_warnings': True,
+                'nocheckcertificate': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': clients,
+                        'player_skip': ['webpage', 'configs', 'js'],
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': 'com.google.android.youtube/19.29.35 (Linux; U; Android 11; en_US) gzip',
+                },
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '128',
+                }],
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=True)
+                title = info.get('title') or title
+                uploader = info.get('uploader') or info.get('channel') or uploader
+
+            audio_files = [
+                os.path.join(temp_dir, f) for f in os.listdir(temp_dir)
+                if f.endswith('.mp3') or f.endswith('.m4a') or f.endswith('.webm') or f.endswith('.opus')
+            ]
+            if audio_files:
+                return audio_files[0], title, uploader
+        except Exception:
+            pass
+
+    # 2. Fallback: Instancias públicas de Invidious (nunca bloquean servidores)
+    invidious_instances = [
+        'https://inv.nadeko.net',
+        'https://invidious.nerdvpn.de',
+        'https://invidious.projectsegfau.lt',
+        'https://yt.artemislena.eu',
+        'https://invidious.flokinet.to',
+        'https://invidious.private.coffee',
+    ]
+
+    for inst in invidious_instances:
+        try:
+            r = requests.get(f'{inst}/api/v1/videos/{video_id}', timeout=4)
+            if r.status_code == 200:
+                data = r.json()
+                title = data.get('title') or title
+                uploader = data.get('author') or uploader
+                adaptive = data.get('adaptiveFormats', [])
+                audio_streams = [f for f in adaptive if (f.get('type', '').startswith('audio/') or f.get('container') in ['m4a', 'webm'])]
+                if audio_streams:
+                    audio_streams.sort(key=lambda x: int(x.get('bitrate', 0)), reverse=True)
+                    stream_url = audio_streams[0].get('url')
+                    if stream_url:
+                        audio_res = requests.get(stream_url, timeout=12, stream=True)
+                        if audio_res.status_code == 200:
+                            target_file = os.path.join(temp_dir, f'{video_id}.m4a')
+                            with open(target_file, 'wb') as f:
+                                for chunk in audio_res.iter_content(chunk_size=65536):
+                                    if chunk:
+                                        f.write(chunk)
+                            return target_file, title, uploader
+        except Exception:
+            pass
+
+    raise Exception('No se pudo extraer la pista de audio de YouTube. Se probaron múltiples métodos móviles e instancias.')
+
+
 @app.get('/analyze-youtube')
 @app.post('/analyze-youtube')
 async def analyze_youtube(id: str = '', url: str = ''):
     import os
     import re
     import tempfile
-    import yt_dlp
 
     video_input = (id or url).strip()
     if not video_input:
@@ -304,36 +396,10 @@ async def analyze_youtube(id: str = '', url: str = ''):
         raise HTTPException(status_code=400, detail='ID o URL de YouTube no válido.')
     video_id = match.group(1)
 
-    yt_url = f'https://www.youtube.com/watch?v={video_id}'
-
     temp_dir = tempfile.mkdtemp()
-    out_template = os.path.join(temp_dir, f'{video_id}.%(ext)s')
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': out_template,
-        'quiet': True,
-        'no_warnings': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '128',
-        }],
-    }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(yt_url, download=True)
-            title = info.get('title') or 'Video de YouTube'
-            uploader = info.get('uploader') or info.get('channel') or 'YouTube'
-
-        audio_file = os.path.join(temp_dir, f'{video_id}.mp3')
-        if not os.path.exists(audio_file):
-            # Buscar cualquier archivo generado en temp_dir
-            files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
-            if not files:
-                raise Exception('No se encontró el archivo de audio descargado.')
-            audio_file = files[0]
+        audio_file, title, uploader = _extract_youtube_audio(video_id, temp_dir)
 
         y, sr = librosa.load(audio_file, sr=SAMPLE_RATE, mono=True)
         if y.size == 0:
