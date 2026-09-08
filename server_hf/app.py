@@ -314,20 +314,14 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
         cookie_file = '/app/cookies.txt'
 
     # 1. Intentar yt-dlp con varias configuraciones
+    AUDIO_FORMAT_SELECTOR = 'ba/ba*/bestaudio/bestaudio*/140/251/249/250/139/best/b'
     ydl_configs = []
     if cookie_file:
-        ydl_configs.append({
-            'name': 'yt-dlp (cookies default)',
-            'opts': {
-                'cookiefile': cookie_file,
-                'format': 'bestaudio/best',
-            },
-        })
         ydl_configs.append({
             'name': 'yt-dlp (cookies web)',
             'opts': {
                 'cookiefile': cookie_file,
-                'format': 'bestaudio/best',
+                'format': AUDIO_FORMAT_SELECTOR,
                 'extractor_args': {
                     'youtube': {
                         'player_client': ['web', 'web_creator', 'mweb'],
@@ -338,40 +332,59 @@ def _extract_youtube_audio(video_id: str, temp_dir: str):
                 },
             },
         })
+        ydl_configs.append({
+            'name': 'yt-dlp (cookies mweb)',
+            'opts': {
+                'cookiefile': cookie_file,
+                'format': AUDIO_FORMAT_SELECTOR,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['mweb', 'web_safari'],
+                    }
+                },
+            },
+        })
+        ydl_configs.append({
+            'name': 'yt-dlp (cookies default)',
+            'opts': {
+                'cookiefile': cookie_file,
+                'format': AUDIO_FORMAT_SELECTOR,
+            },
+        })
 
     ydl_configs.extend([
         {
             'name': 'yt-dlp (android)',
             'opts': {
-                'format': 'bestaudio/best',
+                'format': AUDIO_FORMAT_SELECTOR,
                 'extractor_args': {'youtube': {'player_client': ['android']}},
             },
         },
         {
             'name': 'yt-dlp (ios)',
             'opts': {
-                'format': 'bestaudio/best',
+                'format': AUDIO_FORMAT_SELECTOR,
                 'extractor_args': {'youtube': {'player_client': ['ios']}},
             },
         },
         {
             'name': 'yt-dlp (android_vr,web_embedded)',
             'opts': {
-                'format': 'bestaudio/best',
+                'format': AUDIO_FORMAT_SELECTOR,
                 'extractor_args': {'youtube': {'player_client': ['android_vr', 'web_embedded']}},
             },
         },
         {
             'name': 'yt-dlp (mweb)',
             'opts': {
-                'format': 'bestaudio/best',
+                'format': AUDIO_FORMAT_SELECTOR,
                 'extractor_args': {'youtube': {'player_client': ['mweb']}},
             },
         },
         {
             'name': 'yt-dlp (default)',
             'opts': {
-                'format': 'bestaudio/best',
+                'format': AUDIO_FORMAT_SELECTOR,
             },
         },
     ])
